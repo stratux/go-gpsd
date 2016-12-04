@@ -16,6 +16,7 @@ type Session struct {
   socket  net.Conn
   reader  *bufio.Reader
   filters map[string][]Filter
+  done    chan struct{}
 }
 
 type Mode byte
@@ -166,6 +167,10 @@ func Dial(address string) (session *Session, err error) {
   session = new(Session)
   session.socket, err = net.Dial("tcp4", address)
 
+  if err != nil {
+    return nil, err
+  }
+
   session.reader = bufio.NewReader(session.socket)
   line, _ := session.reader.ReadString('\n')
   _ = line
@@ -183,6 +188,7 @@ func Dial(address string) (session *Session, err error) {
 func (s *Session) Watch() (done chan bool) {
   fmt.Fprintf(s.socket, "?WATCH={\"enable\":true,\"json\":true}")
   done = make(chan bool)
+  s.done = make(chan struct{})
 
   go watch(done, s)
 
@@ -208,6 +214,10 @@ func (s *Session) AddFilter(class string, f Filter) {
   s.filters[class] = append(s.filters[class], f)
 }
 
+func (s *Session) Close() {
+  s.done <- struct{}{}
+}
+
 func (s *Session) deliverReport(class string, report interface{}) {
   for _, f := range s.filters[class] {
     f(report)
@@ -229,7 +239,13 @@ func watch(done chan bool, s *Session) {
         }
 
         if report, err := unmarshalReport(reportPeek.Class, lineBytes); err == nil {
-          s.deliverReport(reportPeek.Class, report)
+          select {
+          case <-s.done:
+            s.socket.Close()
+            return
+          default:
+            s.deliverReport(reportPeek.Class, report)
+          }
         } else {
           fmt.Println("JSON parsing error 2:", err)
         }
@@ -238,6 +254,8 @@ func watch(done chan bool, s *Session) {
       }
     } else {
       fmt.Println("Stream reader error:", err)
+      done <- true
+      return
     }
   }
 }
